@@ -1,16 +1,10 @@
 // Sentence recognizer on Pico 2 W
-// PC mic -> UDP -> ring buffer -> MFCC frames -> 2 s sliding window -> TFLM model -> action
-// Replies go to the PC over UDP: text on EVENT_PORT, audio files on AUDIO_PORT.
-//
-// Changes compared with the previous version:
-//  - every lwIP call (pbuf_alloc, udp_sendto, pbuf_free) is now INSIDE
-//    cyw43_arch_lwip_begin()/end(), as required with pico_cyw43_arch_lwip_threadsafe_background
-//  - the return value of udp_sendto() is checked and reported (with up to 3 attempts)
-//  - after each audio file the Pico prints how many packets were really accepted by lwIP
+// PC mic -> UDP (float32) -> ring buffer -> Low-pass Filter -> Quantization -> MFCC -> TFLM model
 
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
@@ -19,15 +13,12 @@
 #include "lwip/netif.h"
 
 #include "audio_data.h"
-
 #include "fft.h"
 #include "mfcc.h"
 #include "kws.h"
-
-// WIFI_SSID and WIFI_PASS live in wifi_config.h
 #include "wifi_config.h"
 
-#define UDP_PORT     5005          // audio from the PC microphone comes in here
+#define UDP_PORT     5005          // audio from the PC microphone comes in here (float32)
 #define EVENT_PORT   5006          // recognized text goes to the PC here
 #define AUDIO_PORT   5007          // audio answer files go to the PC here
 #ifndef PC_IP
@@ -38,7 +29,7 @@
 #define NUM_FRAMES   KWS_FRAMES
 #define NUM_BINS     (FFT_SIZE / 2 + 1)
 
-#define RING_SIZE    65536
+#define RING_SIZE    32768
 #define RING_MASK    (RING_SIZE - 1)
 
 // ---- detection settings ----
@@ -46,6 +37,10 @@
 #define CMD_THRESHOLD  0.80f
 #define CONFIRM_COUNT  2
 #define COOLDOWN_MS    2500
+
+// ---- Filter Coefficients (Butterworth Low-pass, Order 5, 7500 Hz) ----
+const float B_COEFFS[6] = {0.72736049f, 3.63680246f, 7.27360493f, 7.27360493f, 3.63680246f, 0.72736049f};
+const float A_COEFFS[6] = {1.0f, 4.36489385f, 7.65660433f, 6.74371289f, 2.98127143f, 0.52905328f};
 
 // ---- classes ----
 static const char *CLASS_NAMES[KWS_NUM_LABELS] = {
@@ -58,8 +53,8 @@ static const char *CLASS_NAMES[KWS_NUM_LABELS] = {
     "turn off the LED"
 };
 
-// ---- audio ring buffer ----
-static int8_t ring[RING_SIZE];
+// ---- audio ring buffer (Now stores float32) ----
+static float ring[RING_SIZE];
 static volatile uint32_t head = 0;
 static volatile uint32_t tail = 0;
 static volatile uint32_t overruns = 0;
@@ -77,7 +72,7 @@ static bool     blinking = false;
 static int      blink_toggles_left = 0;
 static uint32_t next_toggle_ms = 0;
 
-// ---- UDP socket used to send things to the PC ----
+// ---- UDP socket ----
 static struct udp_pcb *event_pcb = NULL;
 static err_t last_send_err = ERR_OK;
 
@@ -97,8 +92,27 @@ static void led_update(uint32_t now) {
     }
 }
 
-// Sends one UDP datagram to the PC. Returns true when lwIP accepted it.
-// All lwIP calls are inside the lwIP lock (needed with the threadsafe_background driver).
+// ---- Low-pass Filter (IIR Direct Form I) ----
+static float filter_sample(float x) {
+    static float x_hist[5] = {0};
+    static float y_hist[5] = {0};
+
+    float y = B_COEFFS[0] * x +
+              B_COEFFS[1] * x_hist[0] + B_COEFFS[2] * x_hist[1] + 
+              B_COEFFS[3] * x_hist[2] + B_COEFFS[4] * x_hist[3] + B_COEFFS[5] * x_hist[4]
+            - A_COEFFS[1] * y_hist[0] - A_COEFFS[2] * y_hist[1] - 
+              A_COEFFS[3] * y_hist[2] - A_COEFFS[4] * y_hist[3] - A_COEFFS[5] * y_hist[4];
+
+    for (int i = 4; i > 0; i--) {
+        x_hist[i] = x_hist[i-1];
+        y_hist[i] = y_hist[i-1];
+    }
+    x_hist[0] = x;
+    y_hist[0] = y;
+    return y;
+}
+
+// ---- Send UDP to PC ----
 static bool udp_send_to_pc(const uint8_t *data, size_t len, u16_t port) {
     if (event_pcb == NULL) return false;
 
@@ -125,7 +139,6 @@ static bool udp_send_to_pc(const uint8_t *data, size_t len, u16_t port) {
     return ok;
 }
 
-// Sends the recognized sentence as text
 static void send_event_to_pc(const char *text) {
     last_send_err = ERR_OK;
     bool ok = udp_send_to_pc((const uint8_t *)text, strlen(text), EVENT_PORT);
@@ -133,7 +146,6 @@ static void send_event_to_pc(const char *text) {
            text, ok ? "sent" : "FAILED", (int)last_send_err);
 }
 
-// Sends an audio file in packets of 512 bytes: "FILE:<id>:<seq>:<total>:" + payload
 static void send_audio_to_pc(const char *file_id, const unsigned char *audio_data, unsigned int audio_len) {
     printf("DEBUG: Sending audio %s, size %u bytes\n", file_id, audio_len);
 
@@ -152,49 +164,27 @@ static void send_audio_to_pc(const char *file_id, const unsigned char *audio_dat
         if (udp_send_to_pc(pkt, (size_t)header_len + payload_len, AUDIO_PORT)) ok_count++;
         else fail_count++;
 
-        sleep_ms(5);   // do not flood the Wi-Fi link
+        sleep_ms(5);
     }
 
-    printf("DEBUG: audio %s done: %u of %u packets accepted by lwIP, %u failed (last lwIP err %d)\n",
-           file_id, ok_count, total_packets, fail_count, (int)last_send_err);
+    printf("DEBUG: audio %s done: %u of %u packets accepted, %u failed\n",
+           file_id, ok_count, total_packets, fail_count);
 }
 
-// Runs the action of a recognized sentence (fixed answers, no rotation)
 static void run_action(int label, uint32_t now) {
     send_event_to_pc(CLASS_NAMES[label]);
 
     switch (label) {
-        case 1: // hello how are you
-            send_audio_to_pc("v1", audio_v1, audio_v1_len);
-            break;
-            
-        case 2: // tell me about yourself
-            send_audio_to_pc("v4", audio_v4, audio_v4_len);
-            break;
-            
-        case 3: // what is your name
-            send_audio_to_pc("v7", audio_v7, audio_v7_len);
-            break;
-            
-        case 4: // blink
+        case 1: send_audio_to_pc("v1", audio_v1, audio_v1_len); break;
+        case 2: send_audio_to_pc("v4", audio_v4, audio_v4_len); break;
+        case 3: send_audio_to_pc("v7", audio_v7, audio_v7_len); break;
+        case 4:
             printf("ACTION: blinking the LED for 5 seconds\n");
-            blinking = true;
-            blink_toggles_left = 20;
-            next_toggle_ms = now;
-            break;
-            
-        case 5: // on
-            printf("ACTION: LED on\n");
-            blinking = false;
-            led_set(true);
-            break;
-            
-        case 6: // off
-            printf("ACTION: LED off\n");
-            blinking = false;
-            led_set(false);
-            break;
-            
+            blinking = true; blink_toggles_left = 20; next_toggle_ms = now; break;
+        case 5:
+            printf("ACTION: LED on\n"); blinking = false; led_set(true); break;
+        case 6:
+            printf("ACTION: LED off\n"); blinking = false; led_set(false); break;
         default: break;
     }
 }
@@ -206,16 +196,17 @@ static void fail(const char *msg) {
     }
 }
 
-// Called by lwIP for every UDP packet of microphone audio. Keep it SHORT: only copy bytes.
+// ---- Receive UDP Audio (Now float32) ----
 static void on_udp_packet_received(void *arg, struct udp_pcb *pcb, struct pbuf *p,
                                    const ip_addr_t *addr, u16_t port) {
     if (p == NULL) return;
     uint32_t h = head;
     bool full = false;
     udp_packets = udp_packets + 1;
+    
     for (struct pbuf *q = p; q != NULL && !full; q = q->next) {
-        const int8_t *src = (const int8_t *)q->payload;
-        for (u16_t i = 0; i < q->len; i++) {
+        const float *src = (const float *)q->payload; // Cast to float
+        for (u16_t i = 0; i < q->len / sizeof(float); i++) {
             if ((uint32_t)(h - tail) >= RING_SIZE) {
                 overruns = overruns + 1;
                 full = true;
@@ -259,7 +250,7 @@ int main() {
     if (event_pcb == NULL) { cyw43_arch_lwip_end(); fail("could not create event UDP socket"); }
     cyw43_arch_lwip_end();
 
-    printf("Listening for UDP audio on port %d\n", UDP_PORT);
+    printf("Listening for UDP float32 audio on port %d\n", UDP_PORT);
     printf("Sending recognized text to %s:%d\n", PC_IP, EVENT_PORT);
     printf("Sending audio packets to %s:%d\n", PC_IP, AUDIO_PORT);
 
@@ -279,7 +270,19 @@ int main() {
 
         while ((uint32_t)(head - tail) >= FFT_SIZE) {
             uint32_t t = tail;
-            for (int i = 0; i < FFT_SIZE; i++) frame[i] = ring[(t + i) & RING_MASK];
+            for (int i = 0; i < FFT_SIZE; i++) {
+                // 1. Read raw float32 from ring
+                float raw = ring[(t + i) & RING_MASK];
+                
+                // 2. Apply Low-pass filter
+                float filtered = filter_sample(raw);
+                
+                // 3. Quantize to int8
+                float clipped = filtered;
+                if (clipped > 1.0f) clipped = 1.0f;
+                if (clipped < -1.0f) clipped = -1.0f;
+                frame[i] = (int8_t)roundf(clipped * 127.0f);
+            }
 
             process_audio_frame(frame, power);
             compute_mfcc(power, mfcc_ring[wr]);
