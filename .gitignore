@@ -1,0 +1,28 @@
+# Build outputs
+build/
+pico-tflmicro/
+
+# Python virtual environment
+venv/
+
+# Temporary audio & OS files
+temp_*.wav
+mute_mic
+*.mp3
+.DS_Store
+
+# Backups & old files
+*.bak
+*_old.*
+streaming_before_fix.cpp
+streaming_gostop.cpp
+kws_gostop.h
+model_gostop.h
+
+# Data archives (too large for Git)
+my_data.tar.gz
+my_data/
+# Security & Unnecessary files
+wifi_config.h
+log_*.txt
+answers/
