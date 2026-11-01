@@ -1,5 +1,5 @@
 #pragma once
-// TensorFlow Lite Micro wrapper for the sentence model (7 classes, 2 s window)
+// TensorFlow Lite Micro wrapper for the sentence model (21 classes, 2 s window)
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
@@ -15,9 +15,9 @@
 // ---- must match train_sentences.py ----
 #define KWS_FRAMES      124      // 2 seconds of MFCC frames
 #define KWS_COEFFS      13
-#define KWS_NUM_LABELS  7        // 0 unknown, 1 hello, 2 about, 3 name, 4 blink, 5 on, 6 off
-#define FEAT_MEAN       -1.313614f
-#define FEAT_STD        12.117661f
+#define KWS_NUM_LABELS  21       // 0 unknown, 1-20 sentences
+#define FEAT_MEAN       -3.702219f
+#define FEAT_STD        21.276539f
 
 #define KWS_DEBUG       0        // 1 = print all class probabilities on every inference
 

@@ -1,50 +1,45 @@
 #!/usr/bin/env bash
 
-PORT_TEXT=5006
-PORT_AUDIO=5007
-
 echo "=========================================="
 echo "    تشغيل المساعد الصوتي لـ Pico 2 W"
 echo "=========================================="
 
-# تفعيل بيئة بايثون بالمسار المطلق (أهم خطوة!)
+# 1. إغلاق أي نسخ قديمة تعمل في الخلفية (لمنع خطأ Address already in use)
+echo "[+] إغلاق أي عمليات قديمة..."
+pkill -f pc_receiver.py 2>/dev/null
+pkill -f listen.py 2>/dev/null
+sleep 1
+
+# 2. مسح ملف الكتم إذا كان عالقاً
+rm -f /home/navi/chatboot/mute_mic
+
+# 3. فتح المنافذ في الجدار الناري
+echo "[+] فتح المنافذ $PORT_TEXT و $PORT_AUDIO..."
+sudo iptables -I INPUT -p udp --dport 5006 -j ACCEPT 2>/dev/null
+sudo iptables -I INPUT -p udp --dport 5007 -j ACCEPT 2>/dev/null
+
+# 4. تفعيل بيئة بايثون
 source /home/navi/chatboot/venv/bin/activate
 
-# 1. فتح المنفذين فقط مؤقتاً داخل الجدار الناري
-echo "[+] فتح المنفذين $PORT_TEXT و $PORT_AUDIO في الجدار الناري مؤقتاً..."
-sudo iptables -I INPUT -p udp --dport $PORT_TEXT -j ACCEPT 2>/dev/null
-sudo iptables -I INPUT -p udp --dport $PORT_AUDIO -j ACCEPT 2>/dev/null
-
-# دالة التنظيف وإعادة غلق المنافذ عند الخروج (Ctrl+C)
-cleanup() {
-    echo ""
-    echo "[*] جاري إيقاف البرامج وإعادة تأمين الجهاز..."
-    
-    # إيقاف برنامج الاستقبال إذا كان يعمل
-    if [ -n "$REC_PID" ] && kill -0 "$REC_PID" 2>/dev/null; then
-        kill "$REC_PID" 2>/dev/null
-    fi
-
-    # حذف القواعد وإعادة قفل المنفذين فوراً لحماية جهازك
-    echo "[-] إغلاق المنافذ واستعادة حماية الجدار الناري..."
-    sudo iptables -D INPUT -p udp --dport $PORT_TEXT -j ACCEPT 2>/dev/null
-    sudo iptables -D INPUT -p udp --dport $PORT_AUDIO -j ACCEPT 2>/dev/null
-
-    echo "[✓] تم إيقاف كل شيء والجهاز محمي تماماً الآن."
-    exit 0
-}
-
-# تفعيل التنظيف التلقائي عند الضغط على Ctrl+C أو إغلاق الطرفية
-trap cleanup SIGINT SIGTERM EXIT
-
-# 2. تشغيل برنامج الاستقبال (البوت والصوت) في الخلفية
-echo "[+] تشغيل مستقبل الصوت والنصوص من Pico..."
+# 5. تشغيل مستقبل الصوت في الخلفية
+echo "[+] تشغيل مستقبل الصوت والنصوص..."
 python /home/navi/chatboot/pc_receiver.py &
 REC_PID=$!
 
+# 6. دالة التنظيف عند الخروج (Ctrl+C)
+cleanup() {
+    echo ""
+    echo "[*] جاري إيقاف كل شيء وإغلاق المنافذ..."
+    kill "$REC_PID" 2>/dev/null
+    sudo iptables -D INPUT -p udp --dport 5006 -j ACCEPT 2>/dev/null
+    sudo iptables -D INPUT -p udp --dport 5007 -j ACCEPT 2>/dev/null
+    exit 0
+}
+trap cleanup SIGINT SIGTERM EXIT
+
 sleep 1
 
-# 3. تشغيل المايك في الواجهة لإرسال صوتك للـ Pico
-echo "[+] تشغيل الميكروفون الموجه للـ Pico..."
+# 7. تشغيل المايك في المقدمة
+echo "[+] تشغيل الميكروفون..."
 echo ">>> تحدث الآن في المايك. اضغط Ctrl+C في أي وقت للإيقاف <<<"
 python /home/navi/chatboot/listen.py
