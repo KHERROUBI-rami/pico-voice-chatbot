@@ -4,7 +4,7 @@ import numpy as np
 import socket
 
 # --- Configuration ---
-UDP_IP = "172.17.246.10"
+UDP_IP = "172.16.173.10"
 UDP_PORT = 5005
 FS = 16000
 BLOCKSIZE = 1024

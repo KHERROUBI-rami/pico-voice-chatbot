@@ -4,7 +4,7 @@ echo "=========================================="
 echo "    تشغيل المساعد الصوتي لـ Pico 2 W"
 echo "=========================================="
 
-# 1. إغلاق أي نسخ قديمة تعمل في الخلفية (لمنع خطأ Address already in use)
+# 1. إغلاق أي نسخ قديمة تعمل في الخلفية
 echo "[+] إغلاق أي عمليات قديمة..."
 pkill -f pc_receiver.py 2>/dev/null
 pkill -f listen.py 2>/dev/null
@@ -13,10 +13,10 @@ sleep 1
 # 2. مسح ملف الكتم إذا كان عالقاً
 rm -f /home/navi/chatboot/mute_mic
 
-# 3. فتح المنافذ في الجدار الناري
-echo "[+] فتح المنافذ $PORT_TEXT و $PORT_AUDIO..."
-sudo iptables -I INPUT -p udp --dport 5006 -j ACCEPT 2>/dev/null
-sudo iptables -I INPUT -p udp --dport 5007 -j ACCEPT 2>/dev/null
+# 3. إيقاف الجدار الناري نهائياً لضمان وصول الحزم
+echo "[+] إيقاف الجدار الناري مؤقتاً..."
+sudo systemctl stop firewalld 2>/dev/null
+sudo iptables -F 2>/dev/null
 
 # 4. تفعيل بيئة بايثون
 source /home/navi/chatboot/venv/bin/activate
@@ -29,10 +29,8 @@ REC_PID=$!
 # 6. دالة التنظيف عند الخروج (Ctrl+C)
 cleanup() {
     echo ""
-    echo "[*] جاري إيقاف كل شيء وإغلاق المنافذ..."
+    echo "[*] جاري إيقاف كل شيء..."
     kill "$REC_PID" 2>/dev/null
-    sudo iptables -D INPUT -p udp --dport 5006 -j ACCEPT 2>/dev/null
-    sudo iptables -D INPUT -p udp --dport 5007 -j ACCEPT 2>/dev/null
     exit 0
 }
 trap cleanup SIGINT SIGTERM EXIT

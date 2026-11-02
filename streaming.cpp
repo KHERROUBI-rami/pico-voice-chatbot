@@ -22,7 +22,7 @@
 #define EVENT_PORT   5006          // recognized text goes to the PC here
 #define AUDIO_PORT   5007          // audio answer files go to the PC here
 #ifndef PC_IP
-#define PC_IP        "172.17.246.56"
+#define PC_IP        "172.16.173.56"
 #endif
 
 #define HOP_SIZE     (FFT_SIZE / 2)
@@ -42,32 +42,18 @@
 const float B_COEFFS[6] = {0.72736049f, 3.63680246f, 7.27360493f, 7.27360493f, 3.63680246f, 0.72736049f};
 const float A_COEFFS[6] = {1.0f, 4.36489385f, 7.65660433f, 6.74371289f, 2.98127143f, 0.52905328f};
 
-// ---- classes (21 classes) ----
+// ---- classes ----
 static const char *CLASS_NAMES[KWS_NUM_LABELS] = {
-    "unknown",                     // 0
-    "hello how are you",           // 1
-    "what is your name",           // 2
-    "tell me about yourself",      // 3
-    "when were you created",       // 4
-    "can you play music",          // 5
-    "what time is it",             // 6
-    "what is your memory size",    // 7
-    "how is the weather",          // 8
-    "what can you do",             // 9
-    "good morning",                // 10
-    "good night",                  // 11
-    "turn on the led",             // 12
-    "turn off the led",            // 13
-    "blink the led",               // 14
-    "open the door",               // 15
-    "close the door",              // 16
-    "turn up the volume",          // 17
-    "turn down the volume",        // 18
-    "start listening",             // 19
-    "stop listening"               // 20
+    "unknown",
+    "hello how are you",
+    "tell me about yourself",
+    "what is your name",
+    "blink the LED",
+    "turn on the LED",
+    "turn off the LED"
 };
 
-// ---- audio ring buffer (float32) ----
+// ---- audio ring buffer (Now stores float32) ----
 static float ring[RING_SIZE];
 static volatile uint32_t head = 0;
 static volatile uint32_t tail = 0;
@@ -106,7 +92,7 @@ static void led_update(uint32_t now) {
     }
 }
 
-// ---- Low-pass Filter ----
+// ---- Low-pass Filter (IIR Direct Form I) ----
 static float filter_sample(float x) {
     static float x_hist[5] = {0};
     static float y_hist[5] = {0};
@@ -185,29 +171,21 @@ static void send_audio_to_pc(const char *file_id, const unsigned char *audio_dat
            file_id, ok_count, total_packets, fail_count);
 }
 
-// ---- Run Action based on class ID ----
 static void run_action(int label, uint32_t now) {
     send_event_to_pc(CLASS_NAMES[label]);
 
     switch (label) {
-        // الجمل التي لها أصوات مسجلة مسبقاً
         case 1: send_audio_to_pc("v1", audio_v1, audio_v1_len); break;
-        case 2: send_audio_to_pc("v7", audio_v7, audio_v7_len); break;
-        case 3: send_audio_to_pc("v4", audio_v4, audio_v4_len); break;
-            
-        // أوامر الليد
-        case 12:
-            printf("ACTION: LED on\n"); blinking = false; led_set(true); break;
-        case 13:
-            printf("ACTION: LED off\n"); blinking = false; led_set(false); break;
-        case 14:
+        case 2: send_audio_to_pc("v4", audio_v4, audio_v4_len); break;
+        case 3: send_audio_to_pc("v7", audio_v7, audio_v7_len); break;
+        case 4:
             printf("ACTION: blinking the LED for 5 seconds\n");
             blinking = true; blink_toggles_left = 20; next_toggle_ms = now; break;
-            
-        // الجمل الجديدة (لم نسجل لها أصوات بعد، نطبع فقط)
-        default:
-            printf("ACTION: Recognized new sentence (no audio file yet)\n");
-            break;
+        case 5:
+            printf("ACTION: LED on\n"); blinking = false; led_set(true); break;
+        case 6:
+            printf("ACTION: LED off\n"); blinking = false; led_set(false); break;
+        default: break;
     }
 }
 
@@ -218,7 +196,7 @@ static void fail(const char *msg) {
     }
 }
 
-// ---- Receive UDP Audio (float32) ----
+// ---- Receive UDP Audio (Now float32) ----
 static void on_udp_packet_received(void *arg, struct udp_pcb *pcb, struct pbuf *p,
                                    const ip_addr_t *addr, u16_t port) {
     if (p == NULL) return;
@@ -227,7 +205,7 @@ static void on_udp_packet_received(void *arg, struct udp_pcb *pcb, struct pbuf *
     udp_packets = udp_packets + 1;
     
     for (struct pbuf *q = p; q != NULL && !full; q = q->next) {
-        const float *src = (const float *)q->payload;
+        const float *src = (const float *)q->payload; // Cast to float
         for (u16_t i = 0; i < q->len / sizeof(float); i++) {
             if ((uint32_t)(h - tail) >= RING_SIZE) {
                 overruns = overruns + 1;
@@ -293,9 +271,13 @@ int main() {
         while ((uint32_t)(head - tail) >= FFT_SIZE) {
             uint32_t t = tail;
             for (int i = 0; i < FFT_SIZE; i++) {
+                // 1. Read raw float32 from ring
                 float raw = ring[(t + i) & RING_MASK];
+                
+                // 2. Apply Low-pass filter
                 float filtered = filter_sample(raw);
                 
+                // 3. Quantize to int8
                 float clipped = filtered;
                 if (clipped > 1.0f) clipped = 1.0f;
                 if (clipped < -1.0f) clipped = -1.0f;

@@ -33,8 +33,3 @@ pico_add_extra_outputs(streaming)
 
 
 
-add_executable(hello hello.cpp)
-target_link_libraries(hello pico_stdlib)
-pico_enable_stdio_usb(hello 1)
-pico_enable_stdio_uart(hello 0)
-pico_add_extra_outputs(hello)
