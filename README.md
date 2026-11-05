@@ -1,123 +1,149 @@
 # 🎙️ Pico 2 W Voice Chatbot (TinyML & Local Audio)
 
-A voice assistant project built around the **Raspberry Pi Pico 2 W (RP2350 + Wi-Fi)**.  
-The PC captures raw microphone audio and streams it to the Pico. The Pico then performs the **Audio DSP (Low-pass Filter + Quantization + FFT + MFCC)** and runs a local TinyML model to recognize specific sentences. Finally, the Pico sends the recognized text and a pre-recorded human voice response back to the PC.
-
----
+An end-to-end, low-latency Edge AI voice assistant built on the **Raspberry Pi Pico 2 W (RP2350)**. The host PC streams raw microphone audio over UDP to the Pico, where all Audio Signal Processing (Filtering, Quantization, STFT/FFT, and MFCC extraction) and TinyML Keyword Spotting (KWS) inference take place locally on-device in real-time.
 
 ## 🏗️ System Architecture & Data Flow
 
-1. **PC (Ear):** Captures raw microphone audio as `float32` and streams it via UDP to the Pico (Port `5005`).
-2. **Pico (Brain - DSP):** Receives `float32` audio, applies a **Butterworth Low-pass Filter**, and performs **Quantization (float32 to int8)** locally.
-3. **Pico (Brain - AI):** Runs FFT $\rightarrow$ MFCC $\rightarrow$ TinyML model (DS-CNN) to recognize 6 specific sentences.
-4. **Pico (Mouth):** Sends the recognized text (UDP Port `5006`) and the audio answer file (UDP Port `5007`) to the PC.
-5. **PC (Speaker):** Reassembles the audio packets and plays them using `mpv`. (Mic is muted during playback to prevent echo).
-
----
-
-## 🛠️ Prerequisites
-
-### Hardware
-- Raspberry Pi Pico 2 W
-- PC with Microphone and Speakers
-
-### Software
-- **Pico SDK** (ensure `PICO_SDK_PATH` is set)
-- **TensorFlow Lite Micro** (`pico-tflmicro` cloned in the project root)
-- **Python 3** (with a virtual environment `venv`)
-- **mpv** (for audio playback on Linux)
-- **Python Packages:** `sounddevice`, `scipy`, `numpy`
-
----
-
-## ⚠️ IMPORTANT SETUP (Missing File)
-
-The `wifi_config.h` file is excluded from this repository for security reasons.  
-**You must create it manually** in the project root before building the Pico firmware:
-
-```c
-// Create a file named wifi_config.h and add your credentials:
-#define WIFI_SSID    "YOUR_WIFI_NAME"
-#define WIFI_PASS    "YOUR_WIFI_PASSWORD"
+```
++-----------------------------------------------------------------------------------+
+|                                      HOST PC                                      |
+|                                                                                   |
+|  [ Micro ] ---> (float32 PCM) ---[ UDP : Port 5005 ]---> [ UDP Receiver ]         |
+|  [ mpv   ] <--- (int8 WAV)    <--[ UDP : Port 5007 ]---  [ Audio Engine ]         |
+|  [ Terminal ] <--- (Plain Text) <--[ UDP : Port 5006 ]-- [ KWS Result   ]         |
++-----------------------------------------------------------------------|-----------+
+                                                                        |
+                                                                        v
++-----------------------------------------------------------------------------------+
+|                              RASPBERRY PI PICO 2 W (RP2350)                       |
+|                                                                                   |
+|  1. Audio LPF      : Butterworth Low-Pass Filter (Anti-aliasing & Noise filter)   |
+|  2. Quantization   : Local float32 -> int8 conversion                             |
+|  3. Spectral DSP   : STFT / FFT -> Mel-Frequency Cepstral Coefficients (MFCC)     |
+|  4. TinyML KWS     : Depthwise Separable CNN (DS-CNN via TensorFlow Lite Micro)   |
+|  5. Action Driver  : Triggers onboard GPIO / Returns WAV audio array to PC        |
++-----------------------------------------------------------------------------------+
 ```
 
----
+## 🛠️ Key Technical Features
 
-## 🚀 How to Build & Run
+* **On-Device Audio DSP Pipeline:** Full C++ implementation of Butterworth Low-Pass Filtering, float32 to int8 quantization, FFT, and 13-band MFCC feature extraction running directly on the RP2350 micro-architecture.
 
-### 1. Build the Pico Firmware
-```bash
-cd ~/chatboot/build
-cmake ..
-make streaming
+* **TinyML Keyword Spotting (KWS):** Executes a quantized Depthwise Separable CNN (DS-CNN) locally using **TensorFlow Lite Micro** (`pico-tflmicro`).
+
+* **Low-Latency Network Stack:** Real-time raw UDP streaming optimized via custom `lwipopts.h` settings.
+
+* **Embedded Audio Engine:** Pre-recorded voice responses stored as 8-bit WAV byte arrays (`audio_data.h`) and transmitted via UDP to the host media player (`mpv`).
+
+* **Echo Suppression:** Automated microphone muting on the PC during response playback to prevent acoustic feedback loops.
+
+## 📂 Repository Structure
+
+```
+.
+├── streaming.cpp          # Main Pico firmware entry point (Audio DSP + TFLM pipeline)
+├── fft.h, mfcc.h          # Audio Signal Processing algorithms (FFT & MFCC)
+├── kws.h, model.h         # TinyML model wrapper and quantized weights
+├── lwipopts.h             # LwIP network configuration tuned for real-time UDP streams
+├── audio_data.h           # Pre-recorded human audio responses converted to C arrays
+├── listen.py              # PC Client: Captures microphone audio & streams via UDP
+├── pc_receiver.py         # PC Server: Listens for text/audio results and triggers mpv
+├── wav_to_header.py       # Utility: Converts raw .wav files into C header arrays
+├── record_10_voices.py    # Utility: Automation script to record new response voices
+└── run_all.sh             # One-click launch script for PC client & receiver
 ```
 
-### 2. Setup PC Environment
+> **Note on Audio Files:** Raw `.wav` audio recordings are intentionally excluded from the repository via `.gitignore` to keep the repository lightweight. The embedded firmware uses the generated `audio_data.h` C byte arrays directly.
+
+## 🛠️ Prerequisites & Setup
+
+### Hardware Requirements
+
+* **Raspberry Pi Pico 2 W** (RP2350 with CYW43439 Wi-Fi chip)
+
+* Host PC running Linux/macOS with built-in Microphone and Speakers
+
+* Micro-USB / USB-C data cable
+
+### Software Dependencies
+
+* **Pico SDK** (Ensure `PICO_SDK_PATH` environment variable is exported)
+
+* **ARM GNU Toolchain** (`arm-none-eabi-gcc`) & **CMake** (v3.13+)
+
+* **TensorFlow Lite Micro** (Cloned at project root as `pico-tflmicro`)
+
+* **Python 3.8+** with `venv`
+
+* **mpv** audio player:
+  * **Arch Linux / EndeavourOS:** `sudo pacman -S mpv`
+  * **Debian / Ubuntu:** `sudo apt install mpv`
+
+## 🔒 Configuration (Missing Header File)
+
+For security reasons, Wi-Fi credentials are excluded from the repository. You must manually create `wifi_config.h` in the project root before compiling:
+
+```cpp
+#ifndef WIFI_CONFIG_H
+#define WIFI_CONFIG_H
+
+#define WIFI_SSID "YOUR_WIFI_NAME"
+#define WIFI_PASS "YOUR_WIFI_PASSWORD"
+
+#endif // WIFI_CONFIG_H
+```
+
+## 🚀 Build & Execution Guide
+
+### 1. Build Pico 2 W Firmware
+
 ```bash
 cd ~/chatboot
-python -m venv venv
+mkdir -p build && cd build
+cmake ..
+make -j8 streaming
+```
+
+*Flash the generated `streaming.uf2` to your Pico 2 W by entering BOOTSEL mode.*
+
+### 2. Configure Host PC Environment
+
+```bash
+cd ~/chatboot
+python3 -m venv venv
 source venv/bin/activate
 pip install sounddevice scipy numpy
 ```
 
-### 3. Run the System
-You can start everything with the provided script:
+### 3. Launch System
+
+Run the host streamer and receiver scripts simultaneously:
+
 ```bash
+chmod +x run_all.sh
 ./run_all.sh
 ```
 
----
+> **Firewall Note:** `run_all.sh` automatically configures Linux `iptables` firewall rules prior to execution to ensure incoming UDP streams on ports 5006 and 5007 are not dropped by system security policies.
 
-## 🗣️ Supported Commands
+## 🗣️ Supported Voice Commands
 
-| Spoken Command | System Action |
-| :--- | :--- |
-| `"hello how are you"` | Plays `v1.wav` |
-| `"tell me about yourself"` | Plays `v4.wav` |
-| `"what is your name"` | Plays `v7.wav` |
-| `"blink the LED"` | Blinks the Pico LED |
-| `"turn on the LED"` | LED ON |
-| `"turn off the LED"` | LED OFF |
+| Spoken Command | Triggered Pico Action | Audio / Hardware Output | 
+| ----- | ----- | ----- | 
+| `"hello how are you"` | Intent #1 Identified | Plays `v1.wav` | 
+| `"tell me about yourself"` | Intent #2 Identified | Plays `v4.wav` | 
+| `"what is your name"` | Intent #3 Identified | Plays `v7.wav` | 
+| `"blink the LED"` | Drives GPIO Sequence | Blinks Onboard Pico LED | 
+| `"turn on the LED"` | Drives GPIO High | Onboard LED ON | 
+| `"turn off the LED"` | Drives GPIO Low | Onboard LED OFF | 
 
----
+## 🚧 Development Status & Future Roadmap
 
-## ⚠️ Current Status & Next Steps (For the next developer)
-
-### ✅ What works perfectly
-- Audio streaming PC $\rightarrow$ Pico (raw `float32`).
-- Pico handles all DSP locally (Filtering, Quantization, FFT, MFCC).
-- UDP text and audio packet transmission Pico $\rightarrow$ PC.
-- Audio playback and echo cancellation.
-
-### 🚧 What needs fixing/improving
-- **Model Accuracy for "hello" and "about":** The TinyML model sometimes confuses "hello" with "about". It needs to be retrained with more diverse samples.
-- **Unknown Fallback (Local LLM):** If the Pico hears an unknown sentence, it does nothing. The next step is to send an `UNKNOWN` signal to the PC to trigger Whisper + Ollama.
-- **Hardware Upgrade (I2S):** Connect an I2S Mic and Speaker directly to the Pico for standalone operation (since the Pico now handles filtering and quantization locally).
-
----
-
-## 📂 Project Structure
-
-```text
-├── streaming.cpp        # Main Pico firmware (DSP + AI)
-├── fft.h, mfcc.h        # Audio DSP processing
-├── kws.h, model.h       # TinyML model
-├── lwipopts.h           # Network config (optimized for float32 UDP)
-├── audio_data.h         # 8-bit WAV files converted to C arrays
-├── listen.py            # PC mic -> UDP streamer (float32)
-├── pc_receiver.py       # Receives text & audio, plays audio
-├── wav_to_header.py     # Converts .wav to audio_data.h
-├── record_10_voices.py  # Records new voice answers
-└── run_all.sh           # One-click script to run everything
-```
-
----
-
-## 📤 Pushing Changes to GitHub
-
-```bash
-cd ~/chatboot
-git add .
-git commit -m "Major Update: Moved Audio Filtering & Quantization to Pico (float32 streaming) + Updated README"
-git push origin main
-```
+* [x] Real-time float32 raw audio streaming over UDP (PC $\rightarrow$ Pico).
+* [x] On-device Butterworth Low-Pass Filter & INT8 Quantization on RP2350.
+* [x] Local STFT / FFT & MFCC feature extraction pipeline.
+* [x] TensorFlow Lite Micro DS-CNN model execution.
+* [x] Automated host echo suppression during response playback.
+* [ ] **Dataset Expansion:** Retrain the DS-CNN model with broader acoustic samples to fix inter-class confusion between `"hello"` and `"about"`.
+* [ ] **Local LLM Fallback:** Emit an `UNKNOWN` packet over UDP when KWS confidence drops below threshold to trigger host-side Whisper + Ollama pipeline.
+* [ ] **Hardware Standalone Mode:** Migrate from PC UDP audio to direct I2S Microphone (INMP441) and I2S DAC (MAX98357A) hardware interface.
